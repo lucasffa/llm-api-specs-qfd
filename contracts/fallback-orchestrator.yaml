@@ -1,0 +1,506 @@
+openapi: 3.1.0
+info:
+  title: Fallback Orchestrator API
+  description: |
+    API para orquestração de cadeia de fallback em múltiplas camadas.
+    Gerencia tentativas hierárquicas entre provedores LLM e conteúdo legado.
+    
+    **Requisito:** RC-004 - Cadeia de Fallback
+    **IAR:** 2.91 (Fundamental)
+  version: 1.0.0
+  contact:
+    name: LLM Integration - QFD Project
+    email: lucas.almeida1@univale.br
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.llm-integration.edu/v1
+    description: Produção
+  - url: https://staging-api.llm-integration.edu/v1
+    description: Staging
+
+tags:
+  - name: Generation
+    description: Endpoints de geração com fallback automático
+  - name: Configuration
+    description: Configuração de prioridades e políticas de fallback
+
+paths:
+  /generate:
+    post:
+      summary: Gera resposta com fallback automático
+      description: |
+        Executa geração de linguagem com fallback automático em múltiplas camadas:
+        1. Provedor primário
+        2. Circuit breaker (detecção de falha)
+        3. Provedor secundário
+        4. Conteúdo legado/pré-computado
+        
+        O contexto é preservado entre todas as tentativas.
+      operationId: generateWithFallback
+      tags:
+        - Generation
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerationRequest'
+            examples:
+              dialogue_generation:
+                summary: Geração de diálogo educacional
+                value:
+                  prompt: "Crie um diálogo em inglês sobre ir ao supermercado"
+                  parameters:
+                    temperature: 0.7
+                    max_tokens: 300
+                  context:
+                    user_id: "student_12345"
+                    session_id: "sess_abc123"
+                    proficiency_level: "A2"
+                    target_language: "en"
+                  fallback_config:
+                    enable_fallback: true
+                    max_retries: 2
+                    use_legacy_on_total_failure: true
+      responses:
+        '200':
+          description: Geração bem-sucedida
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerationResponse'
+              examples:
+                primary_success:
+                  summary: Sucesso no provedor primário
+                  value:
+                    content: "Person A: Good morning! I need to go to the supermarket.\nPerson B: What do you need to buy?"
+                    provider_used: openai
+                    model_used: gpt-4o-mini
+                    fallback_activated: false
+                    fallback_chain: []
+                    metadata:
+                      tokens_used: 45
+                      latency_ms: 1230
+                      cost_usd: 0.000135
+                fallback_success:
+                  summary: Sucesso após fallback
+                  value:
+                    content: "Person A: Hello! I'm going to the supermarket.\nPerson B: Can I come with you?"
+                    provider_used: anthropic
+                    model_used: claude-3-5-haiku-20241022
+                    fallback_activated: true
+                    fallback_chain:
+                      - provider: openai
+                        reason: circuit_breaker_open
+                        timestamp: "2025-11-25T14:32:18Z"
+                    metadata:
+                      tokens_used: 42
+                      latency_ms: 3450
+                      cost_usd: 0.000126
+        '503':
+          description: Todos os provedores indisponíveis, conteúdo legado retornado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerationResponse'
+              example:
+                content: "Desculpe, o serviço está temporariamente indisponível. Por favor, tente novamente em alguns minutos."
+                provider_used: legacy
+                model_used: null
+                fallback_activated: true
+                fallback_chain:
+                  - provider: openai
+                    reason: circuit_breaker_open
+                    timestamp: "2025-11-25T14:32:18Z"
+                  - provider: anthropic
+                    reason: timeout
+                    timestamp: "2025-11-25T14:32:23Z"
+                  - provider: google
+                    reason: rate_limit_exceeded
+                    timestamp: "2025-11-25T14:32:28Z"
+                metadata:
+                  degraded_mode: true
+                  total_latency_ms: 15340
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /fallback/config:
+    get:
+      summary: Obtém configuração de fallback
+      description: Retorna configuração atual de prioridades e políticas de fallback
+      operationId: getFallbackConfig
+      tags:
+        - Configuration
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Configuração recuperada com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FallbackConfig'
+    
+    put:
+      summary: Atualiza configuração de fallback
+      description: |
+        Atualiza ordem de prioridade de provedores e políticas de fallback.
+        Requer permissões administrativas.
+      operationId: updateFallbackConfig
+      tags:
+        - Configuration
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FallbackConfig'
+      responses:
+        '200':
+          description: Configuração atualizada com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FallbackConfig'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /fallback/metrics:
+    get:
+      summary: Métricas de ativação de fallback
+      description: Retorna estatísticas sobre ativações de fallback por provedor e layer
+      operationId: getFallbackMetrics
+      tags:
+        - Configuration
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: time_range
+          in: query
+          description: Intervalo de tempo para métricas
+          schema:
+            type: string
+            enum: [1h, 6h, 24h, 7d, 30d]
+            default: 24h
+      responses:
+        '200':
+          description: Métricas recuperadas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FallbackMetrics'
+
+components:
+  schemas:
+    GenerationRequest:
+      type: object
+      required:
+        - prompt
+      properties:
+        prompt:
+          type: string
+          description: Texto de entrada para geração
+          minLength: 1
+          maxLength: 8000
+          example: "Crie um diálogo em inglês sobre ir ao supermercado"
+        parameters:
+          type: object
+          description: Parâmetros de geração LLM
+          properties:
+            temperature:
+              type: number
+              minimum: 0.0
+              maximum: 2.0
+              default: 0.7
+              example: 0.7
+            max_tokens:
+              type: integer
+              minimum: 1
+              maximum: 4096
+              default: 300
+              example: 300
+            top_p:
+              type: number
+              minimum: 0.0
+              maximum: 1.0
+              example: 0.9
+        context:
+          type: object
+          description: Contexto adicional preservado entre fallbacks
+          properties:
+            user_id:
+              type: string
+              example: "student_12345"
+            session_id:
+              type: string
+              example: "sess_abc123"
+            proficiency_level:
+              type: string
+              enum: [A1, A2, B1, B2, C1, C2]
+              example: "A2"
+            target_language:
+              type: string
+              example: "en"
+          additionalProperties: true
+        fallback_config:
+          type: object
+          description: Configuração específica desta requisição
+          properties:
+            enable_fallback:
+              type: boolean
+              default: true
+              description: Se false, falha imediatamente sem tentar fallback
+            max_retries:
+              type: integer
+              minimum: 0
+              maximum: 5
+              default: 2
+            use_legacy_on_total_failure:
+              type: boolean
+              default: true
+
+    GenerationResponse:
+      type: object
+      required:
+        - content
+        - provider_used
+        - fallback_activated
+      properties:
+        content:
+          type: string
+          description: Conteúdo gerado
+          example: "Person A: Good morning! I need to go to the supermarket.\nPerson B: What do you need to buy?"
+        provider_used:
+          type: string
+          description: Provedor que gerou a resposta final
+          enum: [openai, anthropic, google, legacy]
+          example: openai
+        model_used:
+          type: string
+          nullable: true
+          description: Modelo específico utilizado
+          example: gpt-4o-mini
+        fallback_activated:
+          type: boolean
+          description: Se houve ativação de fallback
+          example: false
+        fallback_chain:
+          type: array
+          description: Histórico de tentativas de fallback
+          items:
+            type: object
+            properties:
+              provider:
+                type: string
+                example: openai
+              reason:
+                type: string
+                enum: [circuit_breaker_open, timeout, rate_limit_exceeded, http_error, unknown_error]
+                example: circuit_breaker_open
+              timestamp:
+                type: string
+                format: date-time
+                example: "2025-11-25T14:32:18Z"
+        metadata:
+          type: object
+          description: Metadados adicionais da geração
+          properties:
+            tokens_used:
+              type: integer
+              example: 45
+            latency_ms:
+              type: integer
+              description: Latência total incluindo tentativas de fallback
+              example: 1230
+            cost_usd:
+              type: number
+              format: float
+              example: 0.000135
+            degraded_mode:
+              type: boolean
+              description: Se resposta veio de conteúdo legado
+              example: false
+          additionalProperties: true
+
+    FallbackConfig:
+      type: object
+      required:
+        - provider_priority
+        - global_timeout_seconds
+      properties:
+        provider_priority:
+          type: array
+          description: Ordem de prioridade dos provedores (índice 0 = primário)
+          items:
+            type: object
+            required:
+              - provider
+              - model
+            properties:
+              provider:
+                type: string
+                enum: [openai, anthropic, google]
+                example: openai
+              model:
+                type: string
+                example: gpt-4o-mini
+              timeout_seconds:
+                type: integer
+                minimum: 1
+                maximum: 30
+                default: 5
+                example: 5
+          minItems: 1
+          maxItems: 3
+          example:
+            - provider: openai
+              model: gpt-4o-mini
+              timeout_seconds: 5
+            - provider: anthropic
+              model: claude-3-5-haiku-20241022
+              timeout_seconds: 5
+        global_timeout_seconds:
+          type: integer
+          description: Timeout total incluindo todas tentativas de fallback
+          minimum: 5
+          maximum: 60
+          default: 12
+          example: 12
+        preserve_context:
+          type: boolean
+          description: Se contexto deve ser preservado entre tentativas
+          default: true
+        emit_fallback_metrics:
+          type: boolean
+          description: Se métricas de fallback devem ser emitidas
+          default: true
+        legacy_content_config:
+          type: object
+          description: Configuração de conteúdo legado
+          properties:
+            enabled:
+              type: boolean
+              default: true
+            source:
+              type: string
+              enum: [precomputed_templates, static_responses, error_message]
+              default: precomputed_templates
+
+    FallbackMetrics:
+      type: object
+      properties:
+        time_range:
+          type: string
+          example: "24h"
+        total_requests:
+          type: integer
+          example: 15234
+        fallback_activations:
+          type: integer
+          description: Total de requisições que ativaram fallback
+          example: 342
+        fallback_rate:
+          type: number
+          format: float
+          description: Percentual de ativações de fallback
+          example: 2.24
+        by_provider:
+          type: array
+          items:
+            type: object
+            properties:
+              provider:
+                type: string
+                example: openai
+              failures:
+                type: integer
+                example: 156
+              fallback_triggered:
+                type: integer
+                example: 156
+              most_common_reason:
+                type: string
+                example: circuit_breaker_open
+        by_layer:
+          type: object
+          properties:
+            primary_success:
+              type: integer
+              example: 14892
+            secondary_success:
+              type: integer
+              example: 312
+            legacy_fallback:
+              type: integer
+              example: 30
+        latency_impact:
+          type: object
+          properties:
+            avg_without_fallback_ms:
+              type: integer
+              example: 1250
+            avg_with_fallback_ms:
+              type: integer
+              example: 3420
+            p95_with_fallback_ms:
+              type: integer
+              example: 8930
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          example: INVALID_REQUEST
+        message:
+          type: string
+          example: Campo 'prompt' é obrigatório
+        details:
+          type: object
+          additionalProperties: true
+        timestamp:
+          type: string
+          format: date-time
+
+  responses:
+    BadRequestError:
+      description: Requisição inválida
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    UnauthorizedError:
+      description: Token de autenticação ausente ou inválido
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    ForbiddenError:
+      description: Operação não permitida
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+

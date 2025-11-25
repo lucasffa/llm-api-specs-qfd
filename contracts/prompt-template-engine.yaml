@@ -1,0 +1,619 @@
+openapi: 3.1.0
+info:
+  title: Prompt Template Engine API
+  description: |
+    API para gerenciamento e renderização de templates de prompts com suporte a
+    few-shot learning, restrições de domínio e versionamento.
+    
+    **Requisito:** RC-014 - Engenharia de Prompt Iterativa
+    **IAR:** 2.91 (Fundamental)
+  version: 1.0.0
+  contact:
+    name: LLM Integration - QFD Project
+    email: lucas.almeida1@univale.br
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.llm-integration.edu/v1
+    description: Produção
+  - url: https://staging-api.llm-integration.edu/v1
+    description: Staging
+
+tags:
+  - name: Templates
+    description: Gerenciamento de templates de prompts
+  - name: Rendering
+    description: Renderização de prompts a partir de templates
+  - name: Validation
+    description: Validação de prompts e templates
+
+paths:
+  /prompts/templates:
+    get:
+      summary: Lista todos os templates
+      description: Retorna lista de templates com filtros opcionais
+      operationId: listTemplates
+      tags:
+        - Templates
+      parameters:
+        - name: status
+          in: query
+          description: Filtrar por status
+          schema:
+            type: string
+            enum: [draft, testing, production, deprecated]
+        - name: category
+          in: query
+          description: Filtrar por categoria de uso
+          schema:
+            type: string
+            enum: [dialogue, vocabulary, grammar, reading_comprehension, writing_assistance]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: page_size
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+      responses:
+        '200':
+          description: Lista de templates
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  templates:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TemplateMetadata'
+                  pagination:
+                    $ref: '#/components/schemas/Pagination'
+
+    post:
+      summary: Cria novo template
+      description: |
+        Cria novo template de prompt com versionamento automático.
+        Versão inicial sempre criada como 'draft'.
+      operationId: createTemplate
+      tags:
+        - Templates
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TemplateCreate'
+      responses:
+        '201':
+          description: Template criado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+
+  /prompts/templates/{template_id}:
+    get:
+      summary: Obtém template por ID
+      description: Retorna template específico com todas suas versões
+      operationId: getTemplate
+      tags:
+        - Templates
+      parameters:
+        - name: template_id
+          in: path
+          required: true
+          schema:
+            type: string
+            example: "dialogue_generator"
+        - name: version
+          in: query
+          description: Versão específica (padrão = production)
+          schema:
+            type: string
+            example: "2.1"
+      responses:
+        '200':
+          description: Template encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+    put:
+      summary: Atualiza template existente
+      description: Cria nova versão do template preservando histórico
+      operationId: updateTemplate
+      tags:
+        - Templates
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: template_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TemplateUpdate'
+      responses:
+        '200':
+          description: Template atualizado (nova versão criada)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Template'
+        '400':
+          $ref: '#/components/responses/BadRequestError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+
+  /prompts/render:
+    post:
+      summary: Renderiza prompt a partir de template
+      description: |
+        Substitui variáveis no template e retorna prompt final validado.
+        Executa validações estruturais antes de retornar.
+      operationId: renderPrompt
+      tags:
+        - Rendering
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RenderRequest'
+            examples:
+              dialogue_a2:
+                summary: Renderização de diálogo nível A2
+                value:
+                  template_id: "dialogue_generator"
+                  version: "2.1"
+                  variables:
+                    target_language: "Inglês"
+                    proficiency_level: "A2"
+                    topic: "Compras no supermercado"
+                    num_turns: 4
+                  validate: true
+      responses:
+        '200':
+          description: Prompt renderizado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenderResponse'
+              example:
+                rendered_prompt: |
+                  Você é um assistente pedagógico especializado em ensino de Inglês.
+                  
+                  Tarefa: Gere um diálogo natural entre duas pessoas sobre o tema "Compras no supermercado".
+                  
+                  Restrições obrigatórias:
+                  - Nível CEFR: A2
+                  - Número de turnos: 4
+                  - Use apenas vocabulário e estruturas apropriadas para A2
+                  
+                  Exemplos de referência:
+                  [...]
+                  
+                  Agora gere o diálogo para: Compras no supermercado
+                validation_result:
+                  valid: true
+                  warnings: []
+                metadata:
+                  template_id: "dialogue_generator"
+                  template_version: "2.1"
+                  character_count: 487
+                  estimated_tokens: 142
+                  context_window_usage_percent: 1.42
+        '400':
+          description: Erro de renderização (variável faltando, validação falhou)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: RENDER_ERROR
+                message: Variável obrigatória 'proficiency_level' não fornecida
+                details:
+                  missing_variables: ["proficiency_level"]
+
+  /prompts/validate:
+    post:
+      summary: Valida prompt renderizado
+      description: |
+        Executa validações estruturais em prompt já renderizado:
+        - Tamanho vs. context window
+        - Presença de placeholders não substituídos
+        - Seções obrigatórias presentes
+      operationId: validatePrompt
+      tags:
+        - Validation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - prompt
+                - target_model
+              properties:
+                prompt:
+                  type: string
+                  description: Texto do prompt a validar
+                target_model:
+                  type: string
+                  description: Modelo LLM alvo (para verificar context window)
+                  example: "gpt-4o-mini"
+      responses:
+        '200':
+          description: Validação executada
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationResult'
+
+components:
+  schemas:
+    TemplateMetadata:
+      type: object
+      required:
+        - id
+        - version
+        - status
+      properties:
+        id:
+          type: string
+          description: Identificador único do template
+          example: "dialogue_generator"
+        version:
+          type: string
+          description: Versão atual
+          example: "2.1"
+        status:
+          type: string
+          enum: [draft, testing, production, deprecated]
+          example: "production"
+        category:
+          type: string
+          enum: [dialogue, vocabulary, grammar, reading_comprehension, writing_assistance]
+          example: "dialogue"
+        description:
+          type: string
+          example: "Gera diálogos contextualizados para prática de vocabulário"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        author:
+          type: string
+          example: "pedagogy_team"
+
+    Template:
+      allOf:
+        - $ref: '#/components/schemas/TemplateMetadata'
+        - type: object
+          required:
+            - variables
+            - prompt_template
+          properties:
+            variables:
+              type: object
+              description: Definição de variáveis do template
+              additionalProperties:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    enum: [string, integer, enum, boolean]
+                  required:
+                    type: boolean
+                    default: false
+                  default:
+                    description: Valor padrão (tipo depende de 'type')
+                  enum_values:
+                    type: array
+                    items:
+                      type: string
+                    description: Valores permitidos se type = enum
+                  description:
+                    type: string
+              example:
+                target_language:
+                  type: string
+                  required: true
+                  description: "Idioma alvo do aprendizado"
+                proficiency_level:
+                  type: enum
+                  enum_values: [A1, A2, B1, B2, C1, C2]
+                  required: true
+                num_turns:
+                  type: integer
+                  default: 4
+            few_shot_examples:
+              type: array
+              description: Exemplos few-shot estruturados
+              minItems: 0
+              maxItems: 10
+              items:
+                type: object
+                required:
+                  - input
+                  - output
+                properties:
+                  input:
+                    type: string
+                  output:
+                    type: string
+                  metadata:
+                    type: object
+                    additionalProperties: true
+            constraints:
+              type: object
+              description: Restrições técnicas e de domínio
+              properties:
+                max_tokens:
+                  type: integer
+                  example: 300
+                temperature:
+                  type: number
+                  example: 0.7
+                cefr_level:
+                  type: string
+                  example: "{{proficiency_level}}"
+                avoid_topics:
+                  type: array
+                  items:
+                    type: string
+                  example: ["política", "religião"]
+            prompt_template:
+              type: string
+              description: |
+                Template do prompt em sintaxe Handlebars.
+                Variáveis referenciadas com {{variable_name}}.
+              example: |
+                Você é um assistente pedagógico especializado em {{target_language}}.
+                
+                Tarefa: Gere um diálogo sobre "{{topic}}".
+                Restrições:
+                - Nível CEFR: {{proficiency_level}}
+                - Turnos: {{num_turns}}
+            changelog:
+              type: array
+              description: Histórico de alterações
+              items:
+                type: object
+                properties:
+                  version:
+                    type: string
+                  timestamp:
+                    type: string
+                    format: date-time
+                  author:
+                    type: string
+                  changes:
+                    type: string
+              example:
+                - version: "2.1"
+                  timestamp: "2025-11-20T10:30:00Z"
+                  author: "prof_maria"
+                  changes: "Adicionados 2 exemplos few-shot para nível A2"
+
+    TemplateCreate:
+      type: object
+      required:
+        - id
+        - description
+        - category
+        - variables
+        - prompt_template
+      properties:
+        id:
+          type: string
+          pattern: '^[a-z0-9_]+$'
+          example: "new_template"
+        description:
+          type: string
+        category:
+          type: string
+          enum: [dialogue, vocabulary, grammar, reading_comprehension, writing_assistance]
+        variables:
+          type: object
+          additionalProperties: true
+        few_shot_examples:
+          type: array
+          items:
+            type: object
+        constraints:
+          type: object
+        prompt_template:
+          type: string
+
+    TemplateUpdate:
+      type: object
+      properties:
+        description:
+          type: string
+        status:
+          type: string
+          enum: [draft, testing, production, deprecated]
+        variables:
+          type: object
+        few_shot_examples:
+          type: array
+        constraints:
+          type: object
+        prompt_template:
+          type: string
+        changelog_entry:
+          type: string
+          description: Descrição das mudanças nesta versão
+          example: "Ajuste de restrições para melhor adequação ao nível B1"
+
+    RenderRequest:
+      type: object
+      required:
+        - template_id
+        - variables
+      properties:
+        template_id:
+          type: string
+          example: "dialogue_generator"
+        version:
+          type: string
+          description: Versão específica (padrão = production)
+          example: "2.1"
+        variables:
+          type: object
+          description: Valores para substituir no template
+          additionalProperties: true
+          example:
+            target_language: "Inglês"
+            proficiency_level: "A2"
+            topic: "Compras no supermercado"
+        validate:
+          type: boolean
+          description: Se deve executar validação estrutural
+          default: true
+
+    RenderResponse:
+      type: object
+      required:
+        - rendered_prompt
+        - validation_result
+      properties:
+        rendered_prompt:
+          type: string
+          description: Prompt final com variáveis substituídas
+        validation_result:
+          $ref: '#/components/schemas/ValidationResult'
+        metadata:
+          type: object
+          properties:
+            template_id:
+              type: string
+            template_version:
+              type: string
+            character_count:
+              type: integer
+            estimated_tokens:
+              type: integer
+              description: Estimativa de tokens (heurística)
+            context_window_usage_percent:
+              type: number
+              format: float
+              description: Percentual do context window do modelo
+
+    ValidationResult:
+      type: object
+      required:
+        - valid
+      properties:
+        valid:
+          type: boolean
+          description: Se prompt passou em todas as validações
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              code:
+                type: string
+                enum: [MISSING_VARIABLE, EXCEEDS_CONTEXT_WINDOW, MISSING_SECTION, INVALID_STRUCTURE]
+              message:
+                type: string
+              severity:
+                type: string
+                enum: [error, warning]
+        warnings:
+          type: array
+          items:
+            type: string
+          example: ["Prompt usa 85% do context window - considere reduzir"]
+
+    Pagination:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        page_size:
+          type: integer
+          example: 20
+        total_items:
+          type: integer
+          example: 47
+        total_pages:
+          type: integer
+          example: 3
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        timestamp:
+          type: string
+          format: date-time
+
+  responses:
+    BadRequestError:
+      description: Requisição inválida
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    UnauthorizedError:
+      description: Autenticação necessária
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    NotFoundError:
+      description: Recurso não encontrado
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+

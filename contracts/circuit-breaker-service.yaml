@@ -1,0 +1,309 @@
+openapi: 3.1.0
+info:
+  title: Circuit Breaker Service API
+  description: |
+    API para gerenciamento de circuit breakers por provedor de LLM.
+    Implementa padrão de resiliência para proteção contra falhas em cascata.
+    
+    **Requisito:** RC-003 - Circuit Breaker
+    **IAR:** 2.91 (Fundamental)
+  version: 1.0.0
+  contact:
+    name: LLM Integration - QFD Project
+    email: lucas.almeida1@univale.br
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: https://api.llm-integration.edu/v1
+    description: Produção
+  - url: https://staging-api.llm-integration.edu/v1
+    description: Staging
+
+tags:
+  - name: Circuit Breaker
+    description: Operações de gerenciamento de circuit breakers
+  - name: Health
+    description: Health checks e status
+
+paths:
+  /circuit-breakers/{provider}/status:
+    get:
+      summary: Consulta status do circuit breaker
+      description: Retorna estado atual (CLOSED, OPEN, HALF_OPEN) do circuit breaker para provedor específico
+      operationId: getCircuitBreakerStatus
+      tags:
+        - Circuit Breaker
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          description: Identificador do provedor LLM
+          schema:
+            type: string
+            enum: [openai, anthropic, google]
+            example: openai
+      responses:
+        '200':
+          description: Status recuperado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CircuitBreakerStatus'
+              examples:
+                closed:
+                  summary: Circuit breaker fechado (operação normal)
+                  value:
+                    provider: openai
+                    state: CLOSED
+                    failure_count: 0
+                    last_failure_time: null
+                    next_attempt_time: null
+                    metadata:
+                      success_count: 1523
+                      total_requests: 1523
+                      uptime_percentage: 100.0
+                open:
+                  summary: Circuit breaker aberto (provedor indisponível)
+                  value:
+                    provider: anthropic
+                    state: OPEN
+                    failure_count: 5
+                    last_failure_time: "2025-11-25T14:32:18Z"
+                    next_attempt_time: "2025-11-25T14:33:18Z"
+                    metadata:
+                      recovery_timeout_seconds: 60
+                      failures_in_window: 5
+        '404':
+          description: Provedor não encontrado
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /circuit-breakers/{provider}/reset:
+    post:
+      summary: Reset manual do circuit breaker
+      description: |
+        Force a transição do circuit breaker para estado CLOSED.
+        Operação administrativa para recuperação após manutenção.
+      operationId: resetCircuitBreaker
+      tags:
+        - Circuit Breaker
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [openai, anthropic, google]
+      responses:
+        '200':
+          description: Circuit breaker resetado com sucesso
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CircuitBreakerStatus'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+
+  /circuit-breakers:
+    get:
+      summary: Lista status de todos os circuit breakers
+      description: Retorna status agregado de todos os provedores configurados
+      operationId: listCircuitBreakers
+      tags:
+        - Circuit Breaker
+      responses:
+        '200':
+          description: Lista de circuit breakers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  circuit_breakers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CircuitBreakerStatus'
+                  summary:
+                    type: object
+                    properties:
+                      total_providers:
+                        type: integer
+                        example: 3
+                      healthy_count:
+                        type: integer
+                        description: Número de provedores com estado CLOSED
+                        example: 2
+                      degraded_count:
+                        type: integer
+                        description: Número de provedores em OPEN ou HALF_OPEN
+                        example: 1
+
+  /health:
+    get:
+      summary: Health check do serviço
+      operationId: healthCheck
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Serviço saudável
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [healthy, degraded, unhealthy]
+                    example: healthy
+                  timestamp:
+                    type: string
+                    format: date-time
+                  providers_available:
+                    type: integer
+                    description: Número de provedores com circuit breaker CLOSED
+                    example: 3
+
+components:
+  schemas:
+    CircuitBreakerStatus:
+      type: object
+      required:
+        - provider
+        - state
+        - failure_count
+      properties:
+        provider:
+          type: string
+          description: Identificador do provedor LLM
+          enum: [openai, anthropic, google]
+          example: openai
+        state:
+          type: string
+          description: Estado atual do circuit breaker
+          enum: [CLOSED, OPEN, HALF_OPEN]
+          example: CLOSED
+        failure_count:
+          type: integer
+          description: Número de falhas consecutivas na janela atual
+          minimum: 0
+          example: 0
+        last_failure_time:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp da última falha registrada
+          example: "2025-11-25T14:32:18Z"
+        next_attempt_time:
+          type: string
+          format: date-time
+          nullable: true
+          description: Timestamp da próxima tentativa (apenas em estado OPEN)
+          example: "2025-11-25T14:33:18Z"
+        metadata:
+          type: object
+          description: Metadados adicionais específicos do estado
+          additionalProperties: true
+          example:
+            success_count: 1523
+            total_requests: 1523
+            uptime_percentage: 100.0
+
+    CircuitBreakerConfig:
+      type: object
+      description: Configuração de circuit breaker por provedor
+      required:
+        - failure_threshold
+        - timeout_seconds
+        - half_open_max_calls
+      properties:
+        failure_threshold:
+          type: integer
+          description: Número de falhas consecutivas para abrir circuit breaker
+          minimum: 1
+          maximum: 20
+          default: 5
+          example: 5
+        timeout_seconds:
+          type: integer
+          description: Tempo em segundos antes de tentar recuperação (OPEN → HALF_OPEN)
+          minimum: 10
+          maximum: 300
+          default: 60
+          example: 60
+        half_open_max_calls:
+          type: integer
+          description: Número de chamadas de teste no estado HALF_OPEN
+          minimum: 1
+          maximum: 5
+          default: 1
+          example: 1
+        sliding_window_size:
+          type: integer
+          description: Tamanho da janela deslizante para contagem de falhas
+          minimum: 5
+          maximum: 100
+          default: 10
+          example: 10
+
+    Error:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Código de erro
+          example: PROVIDER_NOT_FOUND
+        message:
+          type: string
+          description: Mensagem de erro legível
+          example: Provedor 'unknown_provider' não está configurado
+        details:
+          type: object
+          description: Detalhes adicionais do erro
+          additionalProperties: true
+        timestamp:
+          type: string
+          format: date-time
+          example: "2025-11-25T14:32:18Z"
+
+  responses:
+    UnauthorizedError:
+      description: Token de autenticação ausente ou inválido
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: UNAUTHORIZED
+            message: Token de autenticação inválido ou expirado
+
+    ForbiddenError:
+      description: Operação não permitida para este usuário
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: FORBIDDEN
+            message: Usuário não possui permissão para resetar circuit breakers
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Token JWT para autenticação de operações administrativas.
+        Exemplo: `Authorization: Bearer <token>`
+
