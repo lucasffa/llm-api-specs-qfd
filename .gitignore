@@ -1,1 +1,8 @@
 /docs/tcc-full-paper.txt
+/docs/slides.md
+/docs/slides/README.md
+/docs/slides/slides-full.md
+/docs/slides/MARP-USAGE.md
+package.json
+pnpm-lock.yaml
+node_modules
